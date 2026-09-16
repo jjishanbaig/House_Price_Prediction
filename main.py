@@ -160,6 +160,28 @@ def home():
                 gap: 16px;
                 flex-wrap: wrap;
             }
+            .file-upload {
+                margin-top: 30px;
+                padding-top: 24px;
+                border-top: 1px solid rgba(148, 163, 184, 0.14);
+            }
+            .file-upload h2 { margin: 0 0 8px; font-size: 1.15rem; }
+            .file-help { margin: 0 0 14px; color: var(--muted); font-size: 0.9rem; }
+            .file-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+            .file-actions input { max-width: 300px; padding: 11px; }
+            .download-link { display: none; color: var(--primary); font-weight: 700; }
+            .table-wrap {
+                display: none;
+                margin-top: 18px;
+                max-height: 220px;
+                overflow: auto;
+                border: 1px solid rgba(148, 163, 184, 0.14);
+                border-radius: 12px;
+            }
+            table { width: 100%; border-collapse: collapse; font-size: 0.8rem; white-space: nowrap; }
+            th, td { padding: 9px 10px; text-align: left; border-bottom: 1px solid rgba(148, 163, 184, 0.1); }
+            th { color: var(--primary); }
+            td { color: var(--muted); }
             button {
                 border: none;
                 border-radius: 14px;
@@ -255,6 +277,18 @@ def home():
                             <span id="status" class="status">Ready to estimate</span>
                         </div>
                     </form>
+
+                    <section class="file-upload">
+                        <h2>Predict from CSV</h2>
+                        <p class="file-help">Upload all your housing rows and download the complete result file.</p>
+                        <form id="file-form" class="file-actions">
+                            <input id="csv-file" type="file" accept=".csv,text/csv" required />
+                            <button type="submit">Upload CSV</button>
+                            <a id="download-link" class="download-link" download="predictions.csv">Download results</a>
+                            <span id="file-status" class="status">No file selected</span>
+                        </form>
+                        <div id="table-wrap" class="table-wrap"></div>
+                    </section>
                 </div>
 
                 <div class="result-panel">
@@ -272,6 +306,57 @@ def home():
             const statusEl = document.getElementById('status');
             const priceEl = document.getElementById('price');
             const rangeEl = document.getElementById('range');
+            const fileForm = document.getElementById('file-form');
+            const csvFile = document.getElementById('csv-file');
+            const fileStatusEl = document.getElementById('file-status');
+            const downloadLink = document.getElementById('download-link');
+            const tableWrap = document.getElementById('table-wrap');
+
+            function parseCSV(csv) {
+                const rows = [];
+                let row = [];
+                let cell = '';
+                let quoted = false;
+
+                for (let index = 0; index < csv.length; index += 1) {
+                    const character = csv[index];
+                    const nextCharacter = csv[index + 1];
+
+                    if (character === '"' && quoted && nextCharacter === '"') {
+                        cell += '"';
+                        index += 1;
+                    } else if (character === '"') {
+                        quoted = !quoted;
+                    } else if (character === ',' && !quoted) {
+                        row.push(cell);
+                        cell = '';
+                    } else if ((character === '\\n' || character === '\\r') && !quoted) {
+                        if (character === '\\r' && nextCharacter === '\\n') index += 1;
+                        row.push(cell);
+                        rows.push(row);
+                        row = [];
+                        cell = '';
+                    } else {
+                        cell += character;
+                    }
+                }
+
+                if (cell || row.length) {
+                    row.push(cell);
+                    rows.push(row);
+                }
+                return rows;
+            }
+
+            function csvToTable(csv) {
+                const rows = parseCSV(csv.trim());
+                if (!rows.length) return '';
+                const header = rows[0].map(cell => `<th>${cell}</th>`).join('');
+                const body = rows.slice(1).map(row =>
+                    `<tr>${row.map(cell => `<td>${cell}</td>`).join('')}</tr>`
+                ).join('');
+                return `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
+            }
 
             form.addEventListener('submit', async function (event) {
                 event.preventDefault();
@@ -295,12 +380,43 @@ def home():
                     }
 
                     priceEl.textContent = result.predicted_price;
-                    rangeEl.textContent = 'Range: ' + result.fidence_range;
+                    rangeEl.textContent = 'Range: ' + result.confidence_range;
                     statusEl.textContent = 'Success';
                 } catch (error) {
                     statusEl.textContent = error.message;
                     priceEl.textContent = '$0';
                     rangeEl.textContent = 'Range: $0 to $0';
+                }
+            });
+
+            fileForm.addEventListener('submit', async function (event) {
+                event.preventDefault();
+                const file = csvFile.files[0];
+                if (!file) return;
+
+                fileStatusEl.textContent = 'Uploading and predicting...';
+                downloadLink.style.display = 'none';
+                tableWrap.style.display = 'none';
+
+                try {
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    const response = await fetch('/predict-file', { method: 'POST', body: formData });
+                    const result = await response.text();
+                    if (!response.ok) {
+                        let detail = result;
+                        try { detail = JSON.parse(result).detail || result; } catch (_) {}
+                        throw new Error(detail);
+                    }
+
+                    const downloadUrl = URL.createObjectURL(new Blob([result], { type: 'text/csv' }));
+                    downloadLink.href = downloadUrl;
+                    downloadLink.style.display = 'inline-block';
+                    tableWrap.innerHTML = csvToTable(result);
+                    tableWrap.style.display = 'block';
+                    fileStatusEl.textContent = 'Success: all rows predicted';
+                } catch (error) {
+                    fileStatusEl.textContent = error.message;
                 }
             });
         </script>
@@ -339,7 +455,7 @@ def predict(house: HouseFeatures):
         return {
             "predicted_price": f"${price_usd:,.0f}",
             "predicted_price_short":f"${predicted:.2f} hundred thousands",
-            "fidence_range" : f"${price_usd - 39000:,.0f}  to ${price_usd + 39000:,.0f}"
+            "confidence_range" : f"${price_usd - 39000:,.0f}  to ${price_usd + 39000:,.0f}"
         }
     except Exception as e:
         raise HTTPException(
